@@ -352,6 +352,11 @@ class SMARTTestService(CRUDService):
         )
     )
     async def manual_test(self, disks):
+        """
+        Run manual SMART tests for `disks`.
+
+        `type` indicates what type of SMART test will be ran and must be specified.
+        """
         verrors = ValidationErrors()
         if not disks:
             verrors.add(
@@ -610,6 +615,9 @@ class SmartService(SystemServiceService):
 
     @private
     async def smartd_pid(self):
+        """
+        Returns Process PID of smartd daemon. If it is not running, None is returned.
+        """
         proc = await run(
             ['pgrep', '-x', 'smartd'],
             check=False, encoding='utf8'

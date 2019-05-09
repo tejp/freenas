@@ -805,6 +805,9 @@ class AlertServiceService(CRUDService):
         )
     )
     async def send_alerts(self, ids, alert_data):
+        """
+        Send a manual alert using list of Alert Service `ids`.
+        """
         verrors = ValidationErrors()
         if not ids:
             verrors.add(
