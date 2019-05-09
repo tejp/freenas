@@ -22,7 +22,7 @@ from middlewared.alert.base import (
     ProThreadedAlertService,
 )
 from middlewared.alert.base import UnavailableException, AlertService as _AlertService
-from middlewared.schema import Any, Bool, Dict, Int, Str, accepts, Patch, Ref
+from middlewared.schema import Any, Bool, Dict, Int, Str, accepts, Patch, Ref, List
 from middlewared.service import (
     ConfigService, CRUDService, Service, ValidationErrors,
     job, periodic, private,
@@ -792,6 +792,66 @@ class AlertServiceService(CRUDService):
         Delete Alert Service of `id`.
         """
         return await self.middleware.call("datastore.delete", self._config.datastore, id)
+
+    @accepts(
+        List('ids', items=[Int('id')]),
+        Dict(
+            'alert_data',
+            Str('title', required=True),
+            Str('category', required=True, enum=list(AlertCategory.__members__)),
+            Str('level', required=True, enum=list(AlertLevel.__members__)),
+            Str('text', default=None),
+            Str('node', default='A'),
+        )
+    )
+    async def send_alerts(self, ids, alert_data):
+        verrors = ValidationErrors()
+        if not ids:
+            verrors.add(
+                'send_alerts.ids',
+                'This field is required'
+            )
+        else:
+            if not set(ids).issubset({a['id'] for a in (await self.query())}):
+                verrors.add(
+                    'send_alerts.ids',
+                    'Please provide a list of valid id\'s.'
+                )
+
+        verrors.check()
+
+        for id in ids:
+            await self.send_alert(id, alert_data)
+
+    @private
+    async def send_alert(self, id, alert_data):
+        alert_config = await self._get_instance(id)
+
+        factory = ALERT_SERVICES_FACTORIES[alert_config['type']]
+        alert_service = factory(self.middleware, alert_config['attributes'])
+
+        send_alert = Alert(
+            type(
+                'SendAlertClass',
+                (AlertClass,), {
+                    'title': alert_data['title'],
+                    'category': AlertCategory[alert_data['category']],
+                    'level': AlertLevel[alert_data['level']],
+                    'text': alert_data['text'],
+                }
+            ),
+            datetime=datetime.now(),
+            node=alert_data['node'],
+            _uuid=str(uuid.uuid4())
+        )
+
+        try:
+            await alert_service.send([send_alert], [], [send_alert])
+        except Exception:
+            self.logger.error('Error in alert service %r', alert_config['type'], exc_info=True)
+            return False
+        else:
+            return True
 
     @accepts(
         Ref('alert_service_create')
