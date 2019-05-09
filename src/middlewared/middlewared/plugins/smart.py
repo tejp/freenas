@@ -1,6 +1,6 @@
 import functools
 import re
-import syslog
+from datetime import datetime
 from itertools import chain
 
 from middlewared.common.camcontrol import camcontrol_list
@@ -9,7 +9,7 @@ from middlewared.schema import accepts, Bool, Cron, Dict, Int, List, Patch, Str
 from middlewared.validators import Email, Range, Unique
 from middlewared.service import CRUDService, filterable, filter_list, private, SystemServiceService, ValidationErrors
 from middlewared.utils import run
-from middlewared.utils.asyncio_ import asyncio_map
+from middlewared.utils.asyncio_ import asyncio_map, call_later
 
 
 async def annotate_disk_smart_tests(devices, disk):
@@ -298,11 +298,52 @@ class SMARTTestService(CRUDService):
 
         return response
 
+    @private
+    async def manual_test_alert(self, disk, smartd_pid, ids):
+        results = await self.middleware.call(
+            'smart.test.results', [
+                ['disk', '=', disk],
+            ]
+        )
+        alert = {
+            'title': f'Manual SMART Test Run for {disk}',
+            'category': 'STORAGE',
+            'level': 'INFO'
+        }
+        if not results or not results[0]['tests']:
+            await self.middleware.call(
+                'alertservice.send_alerts',
+                ids, {
+                    'text': f'{alert["title"]}\n' + 'Failed to retrieve results.',
+                    **alert
+                }
+            )
+        else:
+            result = results[0]['tests'][0]
+            if result['status'] == 'RUNNING':
+                current_smartd_pid = await self.middleware.call('smart.smartd_pid')
+                if current_smartd_pid == smartd_pid:
+                    call_later(
+                        60,
+                        self.manual_test_alert, [disk, smartd_pid, id]
+                    )
+            else:
+                await self.middleware.call(
+                    'alertservice.send_alerts',
+                    ids, {
+                        'text': f'{alert["title"]}\n' + '\n'.join(
+                            f'{k}: {v}' for k, v in result.items()
+                        ),
+                        **alert
+                    }
+                )
+
     @accepts(
         List(
             'disks', items=[
                 Dict(
                     'disk_run',
+                    List('alert_service_ids', default=[], items=[Int('alert_service_id')]),
                     Str('identifier', required=True),
                     Str('mode', enum=['FOREGROUND', 'BACKGROUND'], default='BACKGROUND'),
                     Str('type', enum=['LONG', 'SHORT', 'CONVEYANCE', 'OFFLINE'], required=True),
@@ -338,6 +379,16 @@ class SMARTTestService(CRUDService):
                     )
                     continue
 
+                if disk['alert_service_ids'] and not set(
+                    disk['alert_service_ids']
+                ).issubset({
+                    a['id'] for a in (await self.middleware.call('alertservice.query'))
+                }):
+                    verrors.add(
+                        'manual_test.disks.alert_service_ids',
+                        f'Please provide a valid list of alert service id\'s for {disk["identifier"]}'
+                    )
+
                 if current_disk['name'] is None or current_disk['name'].startswith('nvd'):
                     verrors.add(
                         'manual_test.disks.identifier',
@@ -353,12 +404,13 @@ class SMARTTestService(CRUDService):
 
         verrors.check()
 
+        smartd_pid = await self.middleware.call('smart.smartd_pid')
+
         return list(
-            await asyncio_map(functools.partial(self.__manual_test, devices), test_disks_list, 16)
+            await asyncio_map(functools.partial(self.__manual_test, devices, smartd_pid), test_disks_list, 16)
         )
 
-    @staticmethod
-    async def __manual_test(devices, disk):
+    async def __manual_test(self, devices, smartd_pid, disk):
         device = devices.get(disk['disk'])
         args = await get_smartctl_args(disk['disk'], device)
 
@@ -372,19 +424,20 @@ class SMARTTestService(CRUDService):
         output = {}
         if proc.returncode:
             output['error'] = proc.stderr
-            syslog.openlog('smartctl', facility=syslog.LOG_DAEMON)
-            syslog.syslog(
-                syslog.LOG_WARNING,
-                f'Self test run for /dev/{disk["disk"]} failed with {proc.returncode} return code'
+            self.middleware.logger.debug(
+                f'Self test for {disk["disk"]} failed with {proc.returncode} return code.'
             )
-            syslog.closelog()
         else:
             time_details = re.findall('test will complete after(.*)', proc.stdout, re.IGNORECASE)
             if not time_details:
                 output['error'] = f'Failed to parse smartctl self test details for {disk["identifier"]}.'
             else:
                 output['Expected Result Time'] = time_details[0].strip()
-                # TODO: Let's setup alerts please as suggested by Vlad
+                if disk['alert_service_ids']:
+                    call_later(
+                        60,
+                        self.manual_test_alert, [disk['disk'], smartd_pid, disk['alert_service_ids']]
+                    )
 
         return {
             'disk': disk['disk'],
@@ -554,3 +607,12 @@ class SmartService(SystemServiceService):
         await self.smart_extend(new)
 
         return new
+
+    @private
+    async def smartd_pid(self):
+        proc = await run(
+            ['pgrep', '-x', 'smartd'],
+            check=False, encoding='utf8'
+        )
+        if not proc.returncode:
+            return int(proc.stdout.split()[0])
