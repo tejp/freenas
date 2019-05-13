@@ -625,6 +625,10 @@ class CertificateBase(Model):
         verbose_name=_("Signing Certificate Authority"),
         on_delete=models.CASCADE
     )
+    cert_revoked = models.BooleanField(
+        verbose_name=_('Revoked Certificate'),
+        default=False
+    )
 
     def __str__(self):
         return self.cert_name
