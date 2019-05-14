@@ -50,7 +50,7 @@ class OpenVPN:
         return OpenVPN.DIGESTS
 
     @staticmethod
-    async def common_validation(self, middleware, data, schema, mode):
+    async def common_validation(middleware, data, schema, mode):
         verrors = ValidationErrors()
 
         # TODO: Let's add checks for cert extensions as well please
@@ -106,6 +106,27 @@ class OpenVPNServerService(SystemServiceService):
         service_model = 'openvpnserver'
         service_verb = 'restart'
 
+    @private
+    async def validate(self, data, schema_name):
+        verrors = await OpenVPN.common_validation(
+            self.middleware, data, schema_name, 'server'
+        )
+
+        for field in ('revoked_certificate_authorities', 'revoked_certificates'):
+            if data.get(field):
+                if not set(data[field]).issubset({
+                    c['id'] for c in (await self.middleware.call(
+                        f'{"certificate" if field == "revoked_certificates" else "certificateauthority"}.query'
+                    ))
+                }):
+                    verrors.add(
+                        f'{schema_name}.{field}',
+                        f'Please provide a list of valid {field.split("_", 1)[1].replace("_", " ")} '
+                        'which exist on the system.'
+                    )
+
+        verrors.check()
+
     @accepts(
         Dict(
             'openvpn_server_update',
@@ -127,6 +148,13 @@ class OpenVPNServerService(SystemServiceService):
         )
     )
     async def do_update(self, data):
+        old_config = await self.config()
+        config = old_config.update(data)
+
+        await self.validate(config, 'openvpn_server_update')
+
+        await self._update_service(old_config, config)
+
         return await self.config()
 
 
