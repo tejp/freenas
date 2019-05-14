@@ -1809,7 +1809,7 @@ class CertificateAuthorityService(CRUDService):
 
         data = {
             k: v for k, v in data.items()
-            if k in ['name', 'certificate', 'privatekey', 'type', 'signedby']
+            if k in ['name', 'certificate', 'privatekey', 'type', 'signedby', 'revoked']
         }
 
         pk = await self.middleware.call(
@@ -1878,6 +1878,12 @@ class CertificateAuthorityService(CRUDService):
                 verrors.add(
                     f'{schema_name}.ca_id',
                     'Please use a CA which has a private key assigned'
+                )
+
+            if ca_data.get('revoked'):
+                verrors.add(
+                    f'{schema_name}.ca_id',
+                    'Please use a CA which has not been revoked.'
                 )
 
         if not csr_cert_data:
@@ -2017,10 +2023,37 @@ class CertificateAuthorityService(CRUDService):
 
         return data
 
+    @private
+    async def revoke_ca_chain(self, ca_id):
+        for cert in await self.middleware.call(
+            'datastore.query',
+            'system.certificate',
+            [('signedby', '=', ca_id)],
+            {'prefix': self._config.datastore_prefix}
+        ):
+            await self.middleware.call('certificate.update', cert['id'], {'revoked': True})
+
+        for ca in await self.middleware.call(
+            'datastore.query',
+            self._config.datastore,
+            [('signedby', '=', ca_id)],
+            {'prefix': self._config.datastore_prefix}
+        ):
+            await self.revoke_ca_chain(ca['id'])
+
+        await self.middleware.call(
+            'datastore.update',
+            self._config.datastore,
+            ca_id,
+            {'revoked': True},
+            {'prefix': self._config.datastore_prefix}
+        )
+
     @accepts(
         Int('id', required=True),
         Dict(
             'ca_update',
+            Bool('revoked'),
             Int('ca_id'),
             Int('csr_cert_id'),
             Str('create_type', enum=['CA_SIGN_CSR']),
@@ -2067,7 +2100,7 @@ class CertificateAuthorityService(CRUDService):
 
         verrors = ValidationErrors()
 
-        if new['name'] != old['name']:
+        if new['name'] != old['name'] or old['revoked'] != new['revoked']:
             await validate_cert_name(
                 self.middleware, data['name'], self._config.datastore, verrors, 'certificate_authority_update.name'
             )
@@ -2082,6 +2115,9 @@ class CertificateAuthorityService(CRUDService):
                 {'name': new['name']},
                 {'prefix': self._config.datastore_prefix}
             )
+
+            if old['revoked'] != new['revoked'] and new['revoked']:
+                await self.revoke_ca_chain(id)
 
             await self.middleware.call('service.start', 'ssl')
 
