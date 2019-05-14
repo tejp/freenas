@@ -1,9 +1,32 @@
+import subprocess
+
 from middlewared.schema import accepts, Bool, Dict, Int, IPAddr, List, Str
 from middlewared.service import SystemServiceService, private
 
 
 class OpenVPN:
-    pass
+    CIPHERS = {}
+
+    @staticmethod
+    def ciphers():
+        if not OpenVPN.CIPHERS:
+            proc = subprocess.Popen(
+                ['openvpn', '--show-ciphers'],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            stdout, stderr = proc.communicate()
+            if not proc.returncode:
+                OpenVPN.CIPHERS = {
+                    v.split(' ')[0].strip(): ' '.join(map(str.strip, v.split(' ')[1:]))
+                    for v in
+                    filter(
+                        lambda v: v and v.split(' ')[0].strip() == v.split(' ')[0].strip().upper(),
+                        stdout.decode('utf8').split('\n')
+                    )
+                }
+
+        return OpenVPN.CIPHERS
+
 
 
 class OpenVPNServerService(SystemServiceService):
@@ -20,7 +43,7 @@ class OpenVPNServerService(SystemServiceService):
             Bool('tls_crypt_auth'),
             Int('certificate_authority', null=True),
             Int('certificate', null=True),
-            Int('cipher', null=True),
+            Int('cipher', null=True, enum=OpenVPN.ciphers()),
             Int('compression', null=True),
             Int('port'),
             IPAddr('server', network=True),
@@ -51,7 +74,7 @@ class OpenVPNClientService(SystemServiceService):
             Bool('tls_crypt_auth'),
             Int('certificate_authority', null=True),
             Int('certificate', null=True),
-            Int('cipher', null=True),
+            Int('cipher', null=True, enum=OpenVPN.ciphers()),
             Int('compression', null=True),
             Int('port'),
             Int('remote_port'),
