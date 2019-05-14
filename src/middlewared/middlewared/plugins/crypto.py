@@ -1469,6 +1469,7 @@ class CertificateService(CRUDService):
         Int('id', required=True),
         Dict(
             'certificate_update',
+            Bool('revoked'),
             Str('name')
         )
     )
@@ -1506,7 +1507,7 @@ class CertificateService(CRUDService):
 
         new.update(data)
 
-        if new['name'] != old['name']:
+        if new['name'] != old['name'] or old['revoked'] != new['revoked']:
 
             verrors = ValidationErrors()
 
