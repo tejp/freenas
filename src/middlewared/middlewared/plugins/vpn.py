@@ -1,7 +1,8 @@
 import subprocess
 
-from middlewared.schema import accepts, Bool, Dict, Int, IPAddr, List, Str
 from middlewared.service import SystemServiceService, private
+from middlewared.schema import accepts, Bool, Dict, Int, IPAddr, List, Str, ValidationErrors
+from middlewared.validators import Port
 
 
 class OpenVPN:
@@ -48,10 +49,59 @@ class OpenVPN:
 
         return OpenVPN.DIGESTS
 
+    @staticmethod
+    async def common_validation(self, middleware, data, schema, mode):
+        verrors = ValidationErrors()
+
+        # TODO: Let's add checks for cert extensions as well please
+        if not await middleware.call(
+            'certificateauthority.query', [
+                ['id', '=', data['certificate_authority']],
+                ['revoked', '=', False]
+            ]
+        ):
+            verrors.add(
+                f'{schema}.certificate_authority',
+                'Please provide a valid id for certificate authority which exists on the system '
+                'and hasn\'t been revoked.'
+            )
+
+        if not await middleware.call(
+            'certificate.query', [
+                ['id', '=', data['certificate']],
+                ['revoked', '=', False]
+            ]
+        ):
+            verrors.add(
+                f'{schema}.certificate',
+                'Please provide a valid id for certificate which exists on the system and hasn\'t been revoked.'
+            )
+
+        other = 'openvpn.server' if mode == 'client' else 'openvpn.client'
+        other_config = await middleware.call(
+            f'{other}.config'
+        )
+
+        if (
+            await middleware.call(
+                'service.started',
+                other.replace('.', '_')
+            ) and data['port'] == other_config['port'] and (
+                not other_config['nobind'] or not data['nobind']
+            )
+        ):
+            verrors.add(
+                f'{schema}.nobind',
+                'Please enable this to concurrently run OpenVPN Server/Client on the same local port.'
+            )
+
+        return verrors
+
 
 class OpenVPNServerService(SystemServiceService):
 
     class Config:
+        namespace = 'openvpn.server'
         service = 'openvpn_server'
         service_model = 'openvpnserver'
         service_verb = 'restart'
@@ -63,14 +113,14 @@ class OpenVPNServerService(SystemServiceService):
             Bool('tls_crypt_auth'),
             Int('certificate_authority', null=True),
             Int('certificate', null=True),
-            Int('cipher', null=True, enum=OpenVPN.ciphers()),
-            Int('compression', null=True),
-            Int('port'),
+            Int('port', validators=[Port()]),
             IPAddr('server', network=True),
             List('revoked_certificate_authorities'),
             List('revoked_certificates'),
             Str('additional_parameters'),
             Str('authentication_algorithm', enum=OpenVPN.digests(), null=True),
+            Str('cipher', null=True, enum=OpenVPN.ciphers()),
+            Str('compression', null=True, enum=['LZO', 'LZ4']),
             Str('device_type', enum=['TUN', 'TAP']),
             Str('protocol', enum=['UDP', 'TCP']),
             Str('topology', null=True, enum=['NET30', 'P2P', 'SUBNET'])
@@ -83,6 +133,7 @@ class OpenVPNServerService(SystemServiceService):
 class OpenVPNClientService(SystemServiceService):
 
     class Config:
+        namespace = 'openvpn.client'
         service = 'openvpn_client'
         service_model = 'openvpnclient'
         service_verb = 'restart'
@@ -94,12 +145,12 @@ class OpenVPNClientService(SystemServiceService):
             Bool('tls_crypt_auth'),
             Int('certificate_authority', null=True),
             Int('certificate', null=True),
-            Int('cipher', null=True, enum=OpenVPN.ciphers()),
-            Int('compression', null=True),
-            Int('port'),
-            Int('remote_port'),
+            Int('port', validators=[Port()]),
+            Int('remote_port', validators=[Port()]),
             Str('additional_parameters'),
             Str('authentication_algorithm', enum=OpenVPN.digests(), null=True),
+            Str('cipher', null=True, enum=OpenVPN.ciphers()),
+            Str('compression', null=True, enum=['LZO', 'LZ4']),
             Str('device_type', enum=['TUN', 'TAP']),
             Str('protocol', enum=['UDP', 'TCP']),
             Str('remote')
